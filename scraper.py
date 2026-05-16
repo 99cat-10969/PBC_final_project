@@ -1,6 +1,3 @@
-Scraper · PY
-Copy
-
 """
 台北市運動中心人數監控
 GitHub Actions 版本：每次執行一次，結果寫入 Google Sheets
@@ -13,30 +10,30 @@ import time
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
- 
+
 import requests
 import gspread
 from google.oauth2.service_account import Credentials
- 
+
 TZ = ZoneInfo("Asia/Taipei")
- 
+
 TPSC_PAGE = "https://booking-tpsc.sporetrofit.com/Home/LocationPeopleNum"
 TPSC_API  = "https://booking-tpsc.sporetrofit.com/Home/loadLocationPeopleNum"
 XINYI_PAGE = "https://xysc.teamxports.com/faq"
 XINYI_API  = "https://xysc.teamxports.com/get-court-cat-people-flow"
- 
+
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GSHEET_CREDS   = os.environ["GSHEET_CREDENTIALS"]
- 
+
 HEADERS_BASE = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
     "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
 }
- 
- 
+
+
 # ── 其他場館（POST API）────────────────────────────────────
- 
+
 def parse_tpsc_json(data) -> list:
     """
     解析 loadLocationPeopleNum 的 JSON 回應
@@ -49,7 +46,7 @@ def parse_tpsc_json(data) -> list:
         items = data.get("locationPeopleNums", [])
     elif isinstance(data, list):
         items = data
- 
+
     for item in items:
         name = item.get("lidName", "")
         pool = item.get("swPeopleNum", 0)
@@ -60,21 +57,21 @@ def parse_tpsc_json(data) -> list:
                 "游泳池": int(pool),
                 "健身房": int(gym),
             })
- 
+
     return results
- 
- 
+
+
 def fetch_all_centers() -> Optional[list]:
     session = requests.Session()
     session.headers.update(HEADERS_BASE)
- 
+
     try:
         # Step 1：先訪問頁面取得 session cookie
         print("  → 取得 TPSC session...")
         resp = session.get(TPSC_PAGE, timeout=15)
         resp.raise_for_status()
         print(f"  → Session cookies: {dict(session.cookies)}")
- 
+
         # Step 2：POST 打 API
         print("  → 呼叫 loadLocationPeopleNum API...")
         api_resp = session.post(
@@ -90,21 +87,21 @@ def fetch_all_centers() -> Optional[list]:
         api_resp.raise_for_status()
         print(f"  → Status: {api_resp.status_code}, Content-Type: {api_resp.headers.get('Content-Type')}")
         print(f"  → Raw response: {api_resp.text[:500]}")
- 
+
         data = api_resp.json()
         results = parse_tpsc_json(data)
- 
+
         if not results:
             print("  [!] JSON 解析出 0 筆，嘗試用文字解析...")
             results = parse_text_fallback(api_resp.text)
- 
+
         return results if results else None
- 
+
     except Exception as e:
         print(f"  [!] TPSC 抓取失敗：{e}")
         return None
- 
- 
+
+
 def parse_text_fallback(text: str) -> list:
     """備援：若 JSON 結構不如預期，嘗試從文字中提取"""
     results = []
@@ -132,10 +129,10 @@ def parse_text_fallback(text: str) -> list:
         else:
             i += 1
     return results
- 
- 
+
+
 # ── 信義運動中心 ──────────────────────────────────────────
- 
+
 def fetch_xinyi() -> dict:
     """
     信義運動中心：直接打 get-court-cat-people-flow API
@@ -144,12 +141,12 @@ def fetch_xinyi() -> dict:
     """
     session = requests.Session()
     session.headers.update(HEADERS_BASE)
- 
+
     pool, gym = None, None
     try:
         # 先取得首頁 cookie
         session.get(XINYI_PAGE, timeout=15)
- 
+
         for site_id in [4]:  # siteId=4 同時包含游泳池和體適能中心
             resp = session.get(
                 XINYI_API,
@@ -170,20 +167,20 @@ def fetch_xinyi() -> dict:
                     pool = count
                 elif "健身" in title or "體適能" in title:
                     gym = count
- 
+
         return {
             "場館": "信義運動中心",
             "游泳池": pool if pool is not None else "ERROR",
             "健身房": gym  if gym  is not None else "ERROR",
         }
- 
+
     except Exception as e:
         print(f"  [!] 信義抓取失敗：{e}")
         return {"場館": "信義運動中心", "游泳池": "ERROR", "健身房": "ERROR"}
- 
- 
+
+
 # ── Google Sheets ─────────────────────────────────────────
- 
+
 def get_sheet():
     creds = Credentials.from_service_account_info(
         json.loads(GSHEET_CREDS),
@@ -197,36 +194,36 @@ def get_sheet():
         ws = sh.add_worksheet(title="人數紀錄", rows=10000, cols=4)
         ws.append_row(["時間", "場館", "游泳池人數", "健身房人數"])
     return ws
- 
- 
+
+
 def save_to_gsheets(rows: list, timestamp: str):
     ws = get_sheet()
     batch = [[timestamp, r["場館"], r["游泳池"], r["健身房"]] for r in rows]
     ws.append_rows(batch, value_input_option="USER_ENTERED")
     print(f"  → 已寫入 Google Sheets（{len(batch)} 筆）")
- 
- 
+
+
 # ── 主程式 ────────────────────────────────────────────────
- 
+
 def main():
     now = datetime.now(TZ)
     print(f"執行時間（台北）：{now.strftime('%Y-%m-%d %H:%M:%S')}")
- 
+
     centers = fetch_all_centers()
     if not centers:
         print("所有場館抓取失敗，結束")
         return
- 
+
     xinyi = fetch_xinyi()
     centers.append(xinyi)
- 
+
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
     print("\n結果：")
     for c in centers:
         print(f"  {c['場館']:<10} 游泳池:{c['游泳池']}  健身房:{c['健身房']}")
- 
+
     save_to_gsheets(centers, timestamp)
- 
- 
+
+
 if __name__ == "__main__":
     main()

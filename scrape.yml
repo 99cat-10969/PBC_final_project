@@ -2,35 +2,26 @@ name: 運動中心人數監控
 
 on:
   schedule:
-    # UTC 時間，台北時間 = UTC+8
-    # 台北 06:00-22:00 → UTC 22:00-14:00（前一天22點到當天14點）
-    # 每15分鐘執行，涵蓋 UTC 22:00~23:45 與 00:00~14:00
     - cron: "0,15,30,45 22,23 * * *"   # 台北 06:00-07:45
     - cron: "0,15,30,45 0-13 * * *"    # 台北 08:00-21:45
     - cron: "0 14 * * *"               # 台北 22:00（最後一次）
-  workflow_dispatch:                   # 手動觸發（測試用）
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 安裝 Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: 安裝套件
-        run: pip install selenium gspread google-auth
-
-      - name: 安裝 Chrome
-        uses: browser-actions/setup-chrome@v1
+        run: pip install -r requirements.txt
 
       - name: 執行爬蟲
         env:
-          SPREADSHEET_ID:    ${{ secrets.SPREADSHEET_ID }}
+          SPREADSHEET_ID:     ${{ secrets.SPREADSHEET_ID }}
           GSHEET_CREDENTIALS: ${{ secrets.GSHEET_CREDENTIALS }}
         run: python scraper.py

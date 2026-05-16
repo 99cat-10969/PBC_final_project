@@ -1,3 +1,6 @@
+Scraper · PY
+Copy
+
 """
 台北市運動中心人數監控
 GitHub Actions 版本：每次執行一次，結果寫入 Google Sheets
@@ -19,7 +22,7 @@ TZ = ZoneInfo("Asia/Taipei")
  
 TPSC_PAGE = "https://booking-tpsc.sporetrofit.com/Home/LocationPeopleNum"
 TPSC_API  = "https://booking-tpsc.sporetrofit.com/Home/loadLocationPeopleNum"
-XINYI_PAGE = "https://xysc.teamxports.com"
+XINYI_PAGE = "https://xysc.teamxports.com/faq"
 XINYI_API  = "https://xysc.teamxports.com/get-court-cat-people-flow"
  
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
@@ -135,34 +138,37 @@ def parse_text_fallback(text: str) -> list:
  
 def fetch_xinyi() -> dict:
     """
-    先訪問 faq 頁面取得 session/cookie，
-    再打 get-court-cat-people-flow API
-    siteId=3 游泳池，siteId=4 健身房
+    信義運動中心：直接打 get-court-cat-people-flow API
+    回傳格式：{"returnCode":"200","data":[{"courtCatTitle":"健身房","currCapacity":7,...}]}
+    siteId=3 → 游泳池區，siteId=4 → 健身房區（依實際場館設定）
     """
     session = requests.Session()
     session.headers.update(HEADERS_BASE)
  
+    pool, gym = None, None
     try:
-        print("  → 取得信義 session...")
+        # 先取得首頁 cookie
         session.get(XINYI_PAGE, timeout=15)
  
-        pool, gym = None, None
-        for site_id, label in [(3, "游泳池"), (4, "健身房")]:
+        for site_id in [4]:  # siteId=4 同時包含游泳池和體適能中心
             resp = session.get(
                 XINYI_API,
                 params={"siteId": site_id},
                 headers={"Referer": XINYI_PAGE},
                 timeout=10,
             )
-            print(f"  [信義 siteId={site_id}] status={resp.status_code} body={resp.text[:200]}")
-            if resp.status_code == 200 and resp.text.strip():
-                data = resp.json()
-                count = (data.get("currentPeople") or data.get("count") or
-                         data.get("people") or data.get("num") or
-                         data.get("CurrentNum") or 0)
-                if site_id == 3:
+            print(f"  [信義 siteId={site_id}] status={resp.status_code} body={resp.text[:300]}")
+            if resp.status_code != 200 or not resp.text.strip():
+                continue
+            data = resp.json()
+            if data.get("returnCode") != "200":
+                continue
+            for item in data.get("data", []):
+                title = item.get("courtCatTitle", "")
+                count = item.get("currCapacity", 0)
+                if "游泳" in title or "泳池" in title:
                     pool = count
-                else:
+                elif "健身" in title or "體適能" in title:
                     gym = count
  
         return {
@@ -224,4 +230,3 @@ def main():
  
 if __name__ == "__main__":
     main()
- 

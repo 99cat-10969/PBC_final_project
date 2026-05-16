@@ -1,67 +1,122 @@
 """
 台北市運動中心人數監控
 GitHub Actions 版本：每次執行一次，結果寫入 Google Sheets
-時段限制（06:00-22:00 台北時間）由 Actions cron 控制
+不使用 Selenium，改用 requests 直接打 API
 """
 import os
 import re
+import json
 import time
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
+import requests
 import gspread
 from google.oauth2.service_account import Credentials
-import json
 
-PAGE_URL  = "https://booking-tpsc.sporetrofit.com/Home/LocationPeopleNum"
-XINYI_URL = "https://xysc.teamxports.com/"
-TZ        = ZoneInfo("Asia/Taipei")
+TZ = ZoneInfo("Asia/Taipei")
 
-# Google Sheets 設定（從環境變數讀取，在 GitHub Secrets 設定）
-SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]       # Google Sheet 的 ID
-GSHEET_CREDS   = os.environ["GSHEET_CREDENTIALS"]   # Service Account JSON 字串
+TPSC_PAGE = "https://booking-tpsc.sporetrofit.com/Home/LocationPeopleNum"
+TPSC_API  = "https://booking-tpsc.sporetrofit.com/Home/loadLocationPeopleNum"
+XINYI_PAGE = "https://xysc.teamxports.com/faq"
+XINYI_API  = "https://xysc.teamxports.com/get-court-cat-people-flow"
 
+SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
+GSHEET_CREDS   = os.environ["GSHEET_CREDENTIALS"]
 
-# ── Selenium ────────────────────────────────────────────
-
-def make_driver(stealth=False):
-    opts = Options()
-    opts.add_argument("--headless=new")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--log-level=3")
-    if stealth:
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-        opts.add_experimental_option("useAutomationExtension", False)
-        opts.add_argument(
-            "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-    return webdriver.Chrome(options=opts)
+HEADERS_BASE = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+    "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+}
 
 
-# ── 爬蟲：其他場館 ───────────────────────────────────────
+# ── 其他場館（POST API）────────────────────────────────────
 
-def parse_centers(body_text: str) -> list:
+def parse_tpsc_json(data) -> list:
+    """
+    解析 loadLocationPeopleNum 的 JSON 回應
+    先印出原始結構，再依格式提取
+    """
     results = []
-    lines = [l.strip() for l in body_text.splitlines() if l.strip()]
+    print(f"  [TPSC raw] type={type(data)}, content={str(data)[:300]}")
+
+    # 常見格式：list of dict，每個有場館名和人數
+    if isinstance(data, list):
+        for item in data:
+            name = (item.get("LocationName") or item.get("Name") or
+                    item.get("name") or item.get("location") or "")
+            pool = (item.get("PoolNum") or item.get("poolNum") or
+                    item.get("pool") or item.get("SwimNum") or 0)
+            gym  = (item.get("GymNum") or item.get("gymNum") or
+                    item.get("gym") or item.get("FitnessNum") or 0)
+            if name:
+                results.append({"場館": name, "游泳池": pool, "健身房": gym})
+    elif isinstance(data, dict):
+        # 可能包在某個 key 裡
+        for key in data:
+            print(f"  [TPSC key] {key}: {str(data[key])[:100]}")
+
+    return results
+
+
+def fetch_all_centers() -> Optional[list]:
+    session = requests.Session()
+    session.headers.update(HEADERS_BASE)
+
+    try:
+        # Step 1：先訪問頁面取得 session cookie
+        print("  → 取得 TPSC session...")
+        resp = session.get(TPSC_PAGE, timeout=15)
+        resp.raise_for_status()
+        print(f"  → Session cookies: {dict(session.cookies)}")
+
+        # Step 2：POST 打 API
+        print("  → 呼叫 loadLocationPeopleNum API...")
+        api_resp = session.post(
+            TPSC_API,
+            headers={
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": TPSC_PAGE,
+                "Origin": "https://booking-tpsc.sporetrofit.com",
+                "Content-Length": "0",
+            },
+            timeout=15,
+        )
+        api_resp.raise_for_status()
+        print(f"  → Status: {api_resp.status_code}, Content-Type: {api_resp.headers.get('Content-Type')}")
+        print(f"  → Raw response: {api_resp.text[:500]}")
+
+        data = api_resp.json()
+        results = parse_tpsc_json(data)
+
+        if not results:
+            print("  [!] JSON 解析出 0 筆，嘗試用文字解析...")
+            results = parse_text_fallback(api_resp.text)
+
+        return results if results else None
+
+    except Exception as e:
+        print(f"  [!] TPSC 抓取失敗：{e}")
+        return None
+
+
+def parse_text_fallback(text: str) -> list:
+    """備援：若 JSON 結構不如預期，嘗試從文字中提取"""
+    results = []
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
     i = 0
     while i < len(lines):
         line = lines[i]
         if "運動中心" in line and "信義" not in line and i + 1 < len(lines):
             center_name = line
-            data_line   = lines[i + 1]
+            data_line = lines[i + 1]
             parts = data_line.split("人")
             if len(parts) >= 3 and parts[0].isdigit():
-                pool   = int(parts[0])
+                pool = int(parts[0])
                 middle = parts[1]
-                gym    = None
+                gym = None
                 for cut in range(1, len(middle)):
                     cap_part = int(middle[:cut])
                     gym_part = int(middle[cut:]) if middle[cut:].isdigit() else None
@@ -76,56 +131,60 @@ def parse_centers(body_text: str) -> list:
     return results
 
 
-def fetch_all_centers() -> Optional[list]:
-    driver = None
-    try:
-        driver = make_driver()
-        driver.get(PAGE_URL)
-        time.sleep(6)
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        return parse_centers(body_text)
-    except Exception as e:
-        print(f"[!] 其他場館抓取失敗：{e}")
-        return None
-    finally:
-        if driver:
-            driver.quit()
-
-
-# ── 爬蟲：信義運動中心 ────────────────────────────────────
+# ── 信義運動中心 ──────────────────────────────────────────
 
 def fetch_xinyi() -> dict:
-    driver = None
+    """
+    先訪問 faq 頁面取得 session/cookie，
+    再打 get-court-cat-people-flow API
+    siteId=3 游泳池，siteId=4 健身房
+    """
+    session = requests.Session()
+    session.headers.update(HEADERS_BASE)
+
     try:
-        driver = make_driver(stealth=True)
-        driver.get(XINYI_URL)
-        time.sleep(8)
-        els  = driver.find_elements(By.CSS_SELECTOR, "p.text-blue-700, p[class*='text-blue-700']")
-        nums = [int(el.text.strip()) for el in els if el.text.strip().isdigit()]
-        if len(nums) >= 2:
-            return {"場館": "信義運動中心", "游泳池": nums[0], "健身房": nums[1]}
-        print(f"[!] 信義：只找到 {len(nums)} 個數字")
-        return {"場館": "信義運動中心", "游泳池": "ERROR", "健身房": "ERROR"}
+        print("  → 取得信義 session...")
+        session.get(XINYI_PAGE, timeout=15)
+
+        pool, gym = None, None
+        for site_id, label in [(3, "游泳池"), (4, "健身房")]:
+            resp = session.get(
+                XINYI_API,
+                params={"siteId": site_id},
+                headers={"Referer": XINYI_PAGE},
+                timeout=10,
+            )
+            print(f"  [信義 siteId={site_id}] status={resp.status_code} body={resp.text[:200]}")
+            if resp.status_code == 200 and resp.text.strip():
+                data = resp.json()
+                count = (data.get("currentPeople") or data.get("count") or
+                         data.get("people") or data.get("num") or
+                         data.get("CurrentNum") or 0)
+                if site_id == 3:
+                    pool = count
+                else:
+                    gym = count
+
+        return {
+            "場館": "信義運動中心",
+            "游泳池": pool if pool is not None else "ERROR",
+            "健身房": gym  if gym  is not None else "ERROR",
+        }
+
     except Exception as e:
-        print(f"[!] 信義抓取失敗：{e}")
+        print(f"  [!] 信義抓取失敗：{e}")
         return {"場館": "信義運動中心", "游泳池": "ERROR", "健身房": "ERROR"}
-    finally:
-        if driver:
-            driver.quit()
 
 
-# ── Google Sheets ────────────────────────────────────────
+# ── Google Sheets ─────────────────────────────────────────
 
 def get_sheet():
-    creds_dict = json.loads(GSHEET_CREDS)
     creds = Credentials.from_service_account_info(
-        creds_dict,
+        json.loads(GSHEET_CREDS),
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
     client = gspread.authorize(creds)
-    sh     = client.open_by_key(SPREADSHEET_ID)
-
-    # 若工作表不存在則建立
+    sh = client.open_by_key(SPREADSHEET_ID)
     try:
         ws = sh.worksheet("人數紀錄")
     except gspread.WorksheetNotFound:
@@ -156,6 +215,7 @@ def main():
     centers.append(xinyi)
 
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    print("\n結果：")
     for c in centers:
         print(f"  {c['場館']:<10} 游泳池:{c['游泳池']}  健身房:{c['健身房']}")
 

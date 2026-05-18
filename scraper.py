@@ -20,7 +20,7 @@ TZ = ZoneInfo("Asia/Taipei")
 TPSC_PAGE = "https://booking-tpsc.sporetrofit.com/Home/LocationPeopleNum"
 TPSC_API  = "https://booking-tpsc.sporetrofit.com/Home/loadLocationPeopleNum"
 XINYI_PAGE = "https://xysc.teamxports.com/faq"
-XINYI_API  = "https://xysc.teamxports.com/get-court-cat-people-flow"
+XINYI_API  = "https://webapi.teamxports.com/api/web/carosel/get-court-cat-people-flow"
 
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GSHEET_CREDS   = os.environ["GSHEET_CREDENTIALS"]
